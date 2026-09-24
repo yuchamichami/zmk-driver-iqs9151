@@ -103,6 +103,16 @@ config INPUT_IQS9151_RESOLUTION_Y
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
 
+config INPUT_IQS9151_TP_FINE_DIVIDER
+    int "IQS9151 trackpad ATI fine divider"
+    range 1 21
+    default 5
+    help
+      TP ATI multipliers (0x117A), bits 13:9. Preserve the original
+      module default unless tuning a custom electrode board. Datasheet
+      v1.1 A.11 recommends a value above 6; this is not a validity limit.
+      Reapplied before ATI on startup and after a sensor reset.
+
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000
@@ -380,6 +390,54 @@ config INPUT_IQS9151_3F_SWIPE_THRESHOLD
     default 200
     help
       Three-finger swipe threshold (driver-side).
+
+config INPUT_IQS9151_ATI_DIAGNOSTICS
+    bool "Dump per-channel measurements after ATI error"
+    default n
+    depends on LOG
+    help
+      Read-only diagnostic dump of counts, references and compensation.
+      Does not bypass ATI errors or enable cursor input on calibration failure.
+
+config INPUT_IQS9151_CALIBRATION_SURVEY
+    bool "A2 diagnostic-only calibration survey (no cursor input)"
+    default n
+    depends on INPUT_IQS9151_TPS43_A2 && LOG
+    select INPUT_IQS9151_ATI_DIAGNOSTICS
+    help
+      Twelve seconds after boot, measure all 156 base channels at fine
+      dividers 20, 12, 8 and 6 using the manufacturer's target-zero method.
+      Then test targets 800, 900 and 1000 at divider 6 only when measured
+      base counts leave sufficient headroom. Hold manual Active mode and
+      disable automatic recalibration while measuring. This firmware never
+      enables touchpad input, even if a calibration candidate passes.
+      Results are volatile diagnostics, not a validated production profile.
+
+config INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY
+    bool "Compare A2 calibration at 2.5, 1.5 and 1 MHz (no cursor input)"
+    default n
+    depends on INPUT_IQS9151_CALIBRATION_SURVEY
+    help
+      Replace the standard calibration survey with three charge-transfer
+      frequency sets from datasheet A.17. At each frequency, measure base
+      counts at fine divider 6, then test targets 800, 825, 850 and 875 only
+      when the measured base leaves more than 50 counts of headroom.
+      Read back all frequency bytes before measuring. Maximum 15 phases,
+      with two complete 156-channel samples per phase. Existing strict
+      calibration checks remain active; no cursor input is enabled.
+
+config INPUT_IQS9151_VALIDATED_CALIBRATION
+    bool "Verify A2 calibration before enabling cursor input"
+    default n
+    depends on INPUT_IQS9151_TPS43_A2 && !INPUT_IQS9151_CALIBRATION_SURVEY
+    help
+      Calibrate the configured fine divider and ATI target in manual Active
+      mode, explicitly reseed, and verify two complete 156-channel samples.
+      Require no TP ATI error, no compensation endpoints, and both count
+      and reference within the unchanged drift limit before enabling input.
+      Restore automatic mode and repeat validation after a sensor reset.
+      A later TP ATI error latches input off until reset and successful
+      revalidation. This opt-in bring-up setting is not a production claim.
 
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"

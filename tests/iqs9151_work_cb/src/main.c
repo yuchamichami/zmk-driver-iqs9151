@@ -1419,3 +1419,21 @@ ZTEST_F(iqs9151_work_cb, test_three_finger_swipe_left_continuous_touch_emits_onc
 }
 
 ZTEST_SUITE(iqs9151_work_cb, NULL, iqs9151_work_cb_setup, iqs9151_work_cb_before, NULL, NULL);
+
+#ifdef CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION
+ZTEST_F(iqs9151_work_cb, test_ati_error_releases_hold_and_latches_input_off) {
+    struct iqs9151_test_frame frame = make_frame(1, IQS9151_TP_MOVEMENT_DETECTED, 20, 20,
+                                                BIT(3), 100, 100, 0, 0);
+    iqs9151_test_force_hold_button(fixture->ctx, INPUT_BTN_0);
+    iqs9151_test_process_frame(fixture->ctx, &frame, 10);
+    zassert_true(iqs9151_test_calibration_fault(fixture->ctx));
+    zassert_equal(iqs9151_test_hold_button(fixture->ctx), 0);
+    zassert_equal(fixture->log.count, 1);
+    zassert_equal(fixture->log.events[0].type, IQS9151_TEST_EVENT_KEY);
+    zassert_equal(fixture->log.events[0].value, 0);
+    frame.info_flags = 0;
+    iqs9151_test_process_frame(fixture->ctx, &frame, 20);
+    zassert_equal(fixture->log.count, 1, "Healthy frame alone must not clear the latch");
+    zassert_true(iqs9151_test_calibration_fault(fixture->ctx));
+}
+#endif

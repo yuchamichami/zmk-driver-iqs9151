@@ -42,6 +42,10 @@ typedef void (*iqs9151_test_event_hook_t)(const struct iqs9151_test_event *event
 #ifdef CONFIG_INPUT_IQS9151_TEST
 const uint8_t *iqs9151_test_config_block(uint16_t address, size_t *size);
 int iqs9151_test_boot_reset(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq);
+int iqs9151_test_calibrate(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq);
+bool iqs9151_test_calibration_fault(const void *ctx);
+int iqs9151_test_survey_phase(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq, unsigned int fine, uint16_t target, uint16_t *base_max, bool *passes);
+int iqs9151_test_survey(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq);
 int iqs9151_test_restore(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq);
 int iqs9151_test_ati(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq);
 int iqs9151_test_ready(const struct gpio_dt_spec *irq, uint16_t timeout_ms);
