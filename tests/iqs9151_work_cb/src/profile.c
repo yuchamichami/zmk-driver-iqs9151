@@ -11,6 +11,7 @@ static unsigned int transfers;
 static uint8_t last_write[8];
 static size_t last_size;
 static bool emulate_sensor;
+static bool defer_alp_ati;
 static uint8_t registers[0x400];
 static unsigned int ati_requests;
 
@@ -53,7 +54,7 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
             }
             if (reg == 0x11BC && (registers[offset] & 0x60) == 0x60) {
                 ati_requests++;
-                registers[offset] &= ~0x60; /* emulate completed calibration */
+                registers[offset] &= ~(defer_alp_ati ? 0x20 : 0x60); /* ALP waits for LP mode */
             }
         }
         return 0;
@@ -82,6 +83,7 @@ static void before(void *fixture) {
     transfers = 0;
     last_size = 0;
     emulate_sensor = false;
+    defer_alp_ati = false;
     ati_requests = 0;
     memset(registers, 0, sizeof(registers));
 }
@@ -158,6 +160,21 @@ ZTEST(iqs9151_profile, test_reset_reloads_configuration_before_event_mode) {
     zassert_mem_equal(registers + 0x246, mask, size);
     zassert_equal(sys_get_le16(registers + 0x1E6), CONFIG_INPUT_IQS9151_RESOLUTION_X);
     zassert_equal(sys_get_le16(registers + 0x1E8), CONFIG_INPUT_IQS9151_RESOLUTION_Y);
+}
+ZTEST(iqs9151_profile, test_pending_alp_does_not_block_trackpad_startup) {
+    emulate_sensor = true;
+    defer_alp_ati = true;
+    zassert_ok(iqs9151_test_restore(&bus, &irq));
+    zassert_true(sys_get_le16(registers + 0x1BC) & BIT(6));
+    zassert_false(sys_get_le16(registers + 0x1BC) & BIT(5));
+    zassert_true(sys_get_le16(registers + 0x1BE) & BIT(8));
+}
+ZTEST(iqs9151_profile, test_pending_alp_does_not_hide_trackpad_ati_error) {
+    emulate_sensor = true;
+    defer_alp_ati = true;
+    registers[0x20] = BIT(3);
+    zassert_equal(iqs9151_test_restore(&bus, &irq), -EIO);
+    zassert_false(sys_get_le16(registers + 0x1BE) & BIT(8));
 }
 ZTEST(iqs9151_profile, test_reset_restore_stops_on_bus_failure) {
     emulate_sensor = true;

@@ -2363,8 +2363,13 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
             return ret;
         }
 
-        if ((sys_get_le16(ctrl) &
-             (IQS9151_SYS_CTRL_ALP_RE_ATI | IQS9151_SYS_CTRL_TP_RE_ATI)) == 0U) {
+        /* Datasheet 5.7: TP ATI runs in Active/Idle modes; ALP ATI runs
+         * only in LP1/LP2. A queued ALP request must not block cursor startup
+         * while the device is sensing the trackpad. Keep it queued for LP.
+         */
+        uint16_t control = sys_get_le16(ctrl);
+        LOG_DBG("ATI control=0x%04x", control);
+        if ((control & IQS9151_SYS_CTRL_TP_RE_ATI) == 0U) {
             uint16_t info;
             ret = iqs9151_read_u16(cfg, IQS9151_ADDR_INFO_FLAGS, &info);
             if (ret != 0) {
@@ -2374,6 +2379,8 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
                 LOG_ERR("ATI calibration error: info=0x%04x; check electrodes/overlay", info);
                 return -EIO;
             }
+            LOG_INF("TP ATI complete: control=0x%04x info=0x%04x ALP pending=%u",
+                    control, info, !!(control & IQS9151_SYS_CTRL_ALP_RE_ATI));
             return 0;
         }
 
