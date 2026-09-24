@@ -12,6 +12,7 @@ static uint8_t last_write[8];
 static size_t last_size;
 static bool emulate_sensor;
 static bool defer_alp_ati;
+static bool drop_fine_write;
 static uint8_t registers[0x400];
 static unsigned int ati_requests;
 
@@ -47,7 +48,9 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
         } else {
             zassert_equal(count, 1);
             zassert_true(offset + msgs[0].len - 2 <= sizeof(registers));
-            memcpy(registers + offset, msgs[0].buf + 2, msgs[0].len - 2);
+            if (!(drop_fine_write && reg == IQS9151_ADDR_ATI_MULTIPLIERS)) {
+                memcpy(registers + offset, msgs[0].buf + 2, msgs[0].len - 2);
+            }
             if (reg == 0x11BC && sys_get_le16(registers + offset) == BIT(9)) {
                 gpio_level = 0; /* reset resumes streaming */
                 registers[0x20] = BIT(7);
@@ -84,6 +87,7 @@ static void before(void *fixture) {
     last_size = 0;
     emulate_sensor = false;
     defer_alp_ati = false;
+    drop_fine_write = false;
     ati_requests = 0;
     memset(registers, 0, sizeof(registers));
 }
@@ -160,6 +164,22 @@ ZTEST(iqs9151_profile, test_reset_reloads_configuration_before_event_mode) {
     zassert_mem_equal(registers + 0x246, mask, size);
     zassert_equal(sys_get_le16(registers + 0x1E6), CONFIG_INPUT_IQS9151_RESOLUTION_X);
     zassert_equal(sys_get_le16(registers + 0x1E8), CONFIG_INPUT_IQS9151_RESOLUTION_Y);
+}
+ZTEST(iqs9151_profile, test_fine_divider_preserves_other_fields_and_survives_reset) {
+    emulate_sensor = true;
+    for (int reset = 0; reset < 2; reset++) {
+        memset(registers, 0, sizeof(registers));
+        zassert_ok(iqs9151_test_restore(&bus, &irq));
+        /* Original 0x4B21 becomes 0x5121: only bits 13:9 change. */
+        zassert_equal(sys_get_le16(registers + 0x17A), 0x5121);
+        zassert_equal(sys_get_le16(registers + 0x196), 400);
+    }
+}
+ZTEST(iqs9151_profile, test_fine_divider_readback_mismatch_stops_before_ati) {
+    emulate_sensor = true;
+    drop_fine_write = true;
+    zassert_equal(iqs9151_test_restore(&bus, &irq), -EIO);
+    zassert_equal(ati_requests, 0);
 }
 ZTEST(iqs9151_profile, test_pending_alp_does_not_block_trackpad_startup) {
     emulate_sensor = true;

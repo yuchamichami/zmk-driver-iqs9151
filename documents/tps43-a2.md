@@ -121,3 +121,13 @@ QEMUテストは実際のドライバーの設定配列と通信関数を使用�
 
 - [ベース実装](https://github.com/ShiniNet/zmk-driver-iqs9151/tree/08a6fd19c5aa5ae7f11daf371b5a391cd8596783)
 - [IQS9150/IQS9151 datasheet](https://www.azoteq.com/images/stories/pdf/IQS9150_IQS9151_datasheet.pdf): v1.1、通信§12、ATI§5.8、System Control付録A.12、ALP付録A.15–16
+
+### Experimental ATI fine divider
+
+`CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER` controls TP register 0x117A bits
+13:9 (1–21). The default remains 5 for compatibility. Datasheet v1.1 A.11
+recommends values above 6; 5 is not an illegal value. A Corcell comparison
+uses target 700 and fine divider 8, changing only the divider relative to
+the preceding target-700 test. Other multiplier/coarse fields are preserved.
+The driver verifies the readback and reapplies the setting after sensor reset.
+This is experimental tuning, not hardware validation; ATI errors remain fatal.

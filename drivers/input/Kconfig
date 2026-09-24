@@ -103,6 +103,16 @@ config INPUT_IQS9151_RESOLUTION_Y
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
 
+config INPUT_IQS9151_TP_FINE_DIVIDER
+    int "IQS9151 trackpad ATI fine divider"
+    range 1 21
+    default 5
+    help
+      TP ATI multipliers (0x117A), bits 13:9. Preserve the original
+      module default unless tuning a custom electrode board. Datasheet
+      v1.1 A.11 recommends a value above 6; this is not a validity limit.
+      Reapplied before ATI on startup and after a sensor reset.
+
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000

@@ -2586,6 +2586,28 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
         return ret;
     }
 
+    /* Fine divider is independent of the multiplier and coarse fields. */
+    ret = iqs9151_update_bits_u16(cfg, IQS9151_ADDR_ATI_MULTIPLIERS,
+                                IQS9151_TP_FINE_DIVIDER_MASK,
+                                CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER <<
+                                    IQS9151_TP_FINE_DIVIDER_SHIFT);
+    if (ret != 0) {
+        LOG_ERR("Failed to apply TP fine divider (%d)", ret);
+        return ret;
+    }
+    uint16_t multipliers;
+    ret = iqs9151_read_u16(cfg, IQS9151_ADDR_ATI_MULTIPLIERS, &multipliers);
+    if (ret != 0) {
+        return ret;
+    }
+    if ((multipliers & IQS9151_TP_FINE_DIVIDER_MASK) !=
+        (CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER << IQS9151_TP_FINE_DIVIDER_SHIFT)) {
+        LOG_ERR("TP fine divider readback mismatch: 0x%04x", multipliers);
+        return -EIO;
+    }
+    LOG_INF("TP ATI multipliers=0x%04x fine_divider=%u target=%u", multipliers,
+            CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER, CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT);
+
     ret = iqs9151_write_u16(cfg, IQS9151_ADDR_TRACKPAD_ATI_TARGET,
                             (uint16_t)CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT);
     if (ret != 0) {
