@@ -381,6 +381,14 @@ config INPUT_IQS9151_3F_SWIPE_THRESHOLD
     help
       Three-finger swipe threshold (driver-side).
 
+config INPUT_IQS9151_ATI_DIAGNOSTICS
+    bool "Dump per-channel measurements after ATI error"
+    default n
+    depends on LOG
+    help
+      Read-only diagnostic dump of counts, references and compensation.
+      Does not bypass ATI errors or enable cursor input on calibration failure.
+
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"
     depends on ZTEST

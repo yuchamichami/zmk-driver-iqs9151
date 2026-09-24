@@ -2350,6 +2350,40 @@ static int iqs9151_run_ati(const struct iqs9151_config *config) {
                             IQS9151_SYS_CTRL_ALP_RE_ATI | IQS9151_SYS_CTRL_TP_RE_ATI);
 }
 
+#if defined(CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS)
+static void iqs9151_dump_ati_error(const struct iqs9151_config *cfg) {
+    /* Datasheet A.26/A.27: densely packed [Tx][Rx], two bytes per cell.
+     * Restrict this bring-up diagnostic to the known IQS9151 profile size.
+     * Reads are sequential snapshots, not a simultaneous capture.
+     */
+    enum { RX = TRACKPAD_SETTINGS_0_1, TX = TRACKPAD_SETTINGS_1_0 };
+    BUILD_ASSERT(RX <= 13 && TX <= 13);
+    uint8_t counts[RX * 2], refs[RX * 2], comps[RX * 2];
+    unsigned int zero = 0, saturated = 0;
+    LOG_INF("ATI dump begin: %u Rx x %u Tx, sequential snapshots", RX, TX);
+    for (unsigned int tx = 0; tx < TX; ++tx) {
+        uint16_t offset = tx * RX * 2;
+        int err = iqs9151_i2c_read(cfg, 0xD000 + offset, comps, sizeof(comps));
+        if (!err) err = iqs9151_i2c_read(cfg, 0xA000 + offset, counts, sizeof(counts));
+        if (!err) err = iqs9151_i2c_read(cfg, 0xB000 + offset, refs, sizeof(refs));
+        if (err) {
+            LOG_ERR("ATI dump aborted at Tx %u: %d", tx, err);
+            return;
+        }
+        for (unsigned int rx = 0; rx < RX; ++rx) {
+            uint16_t raw = sys_get_le16(comps + 2 * rx);
+            uint16_t compensation = raw & 0x3ff;
+            zero += compensation == 0;
+            saturated += compensation == 1023;
+            LOG_INF("ATI cell tx=%u rx=%u comp=%u div=%u count=%u ref=%u",
+                    tx, rx, compensation, (raw >> 10) & 0x1f,
+                    sys_get_le16(counts + 2 * rx), sys_get_le16(refs + 2 * rx));
+        }
+    }
+    LOG_INF("ATI dump end: cells=%u comp_zero=%u comp_max=%u", RX * TX, zero, saturated);
+}
+#endif
+
 static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
     const struct iqs9151_config *cfg = dev->config;
     int64_t start_ms = k_uptime_get();
@@ -2377,6 +2411,9 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
             }
             if (info & (BIT(3) | BIT(5))) {
                 LOG_ERR("ATI calibration error: info=0x%04x; check electrodes/overlay", info);
+#if defined(CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS)
+                iqs9151_dump_ati_error(cfg);
+#endif
                 return -EIO;
             }
             LOG_INF("TP ATI complete: control=0x%04x info=0x%04x ALP pending=%u",
