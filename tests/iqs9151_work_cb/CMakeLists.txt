@@ -74,3 +74,10 @@ target_compile_definitions(app PRIVATE
     CONFIG_INPUT_IQS9151_ALP_THRESHOLD=9
     CONFIG_INPUT_IQS9151_ALP_AUTOPROX_THRESHOLD=11
 )
+
+# Exercise the diagnostic runner separately from normal A2 startup tests.
+if(IQS9151_TEST_SURVEY)
+  target_compile_definitions(app PRIVATE
+    CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY=1
+    CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS=1)
+endif()

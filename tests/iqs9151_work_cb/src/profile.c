@@ -15,6 +15,16 @@ static bool defer_alp_ati;
 static bool drop_fine_write;
 static uint8_t registers[0x400];
 static unsigned int ati_requests;
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+static bool survey_mock;
+static uint16_t survey_base_max;
+static int survey_fail_read;
+static bool survey_reset, survey_candidate_error, survey_bad_count, survey_stale_ref;
+static bool survey_zero_comp;
+static unsigned int base_requests, candidate_requests, cell_reads, reseed_requests;
+static uint16_t requested_targets[8], requested_fine[8];
+#endif
+
 
 
 static int mock_gpio_get(const struct device *dev, gpio_port_value_t *value) {
@@ -38,6 +48,40 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
             return transfer_result;
         }
         uint16_t reg = sys_get_le16(msgs[0].buf);
+#ifdef CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS
+        if (reg >= 0xA000) {
+            zassert_equal(count, 2);
+            zassert_true(msgs[1].flags & I2C_MSG_READ);
+            uint16_t target = sys_get_le16(registers + 0x196);
+            uint16_t fine = (sys_get_le16(registers + 0x17A) >> 9) & 31;
+            for (size_t i = 0; i < msgs[1].len; i += 2) {
+                uint16_t value = 0;
+                if ((reg & 0xF000) == 0xD000) {
+                    value = target ? (780 | (16 << 10)) : (31 << 10);
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+                    if (survey_mock && survey_zero_comp) value &= ~0x3ff;
+#endif
+                } else {
+                    value = target ? target : 100;
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+                    if (survey_mock && survey_bad_count && target && (reg & 0xF000) == 0xA000) value = target + 51;
+                    if (survey_mock && survey_stale_ref && !target && (reg & 0xF000) == 0xB000) value = 65535;
+                    if (survey_mock && !target && ((reg & 0xFFF) + i) == 154 && (reg & 0xF000) == 0xA000) {
+                        value = survey_base_max * fine / 6;
+                    }
+#endif
+                }
+                sys_put_le16(value, msgs[1].buf + i);
+            }
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+            if (survey_mock) {
+                cell_reads++;
+                if (survey_fail_read) return survey_fail_read;
+            }
+#endif
+            return 0;
+        }
+#endif
         zassert_true(reg >= 0x1000 && reg < 0x1400);
         size_t offset = reg - 0x1000;
         if (count == 2) {
@@ -55,6 +99,23 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
                 gpio_level = 0; /* reset resumes streaming */
                 registers[0x20] = BIT(7);
             }
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+            if (survey_mock && reg == 0x11BC && (registers[offset] & BIT(3))) {
+                registers[offset] &= ~BIT(3);
+                reseed_requests++;
+            }
+            if (survey_mock && reg == 0x11BC && (registers[offset] & BIT(5))) {
+                uint16_t target = sys_get_le16(registers + 0x196);
+                zassert_true(ati_requests < ARRAY_SIZE(requested_targets));
+                requested_targets[ati_requests] = target;
+                requested_fine[ati_requests] = (sys_get_le16(registers + 0x17A) >> 9) & 31;
+                ati_requests++;
+                if (target == 0) base_requests++; else candidate_requests++;
+                registers[offset] &= ~BIT(5);
+                registers[0x20] = survey_reset ? BIT(7) : ((target == 0 || survey_candidate_error) ? BIT(3) : 0);
+                return 0;
+            }
+#endif
             if (reg == 0x11BC && (registers[offset] & 0x60) == 0x60) {
                 ati_requests++;
                 registers[offset] &= ~(defer_alp_ati ? 0x20 : 0x60); /* ALP waits for LP mode */
@@ -90,6 +151,15 @@ static void before(void *fixture) {
     drop_fine_write = false;
     ati_requests = 0;
     memset(registers, 0, sizeof(registers));
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+    survey_mock = false;
+    survey_base_max = 700;
+    survey_fail_read = 0;
+    survey_reset = survey_candidate_error = survey_bad_count = survey_stale_ref = survey_zero_comp = false;
+    base_requests = candidate_requests = cell_reads = reseed_requests = 0;
+    memset(requested_targets, 0, sizeof(requested_targets));
+    memset(requested_fine, 0, sizeof(requested_fine));
+#endif
 }
 
 ZTEST(iqs9151_profile, test_ati_register_and_byte_order) {
@@ -218,3 +288,76 @@ ZTEST(iqs9151_profile, test_host_reboot_resets_silent_sensor_without_reset_wire)
     zassert_true(registers[0x20] & BIT(7));
 }
 ZTEST_SUITE(iqs9151_profile, NULL, NULL, before, NULL, NULL);
+
+#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+static void prepare_survey(void) {
+    emulate_sensor = survey_mock = true;
+    sys_put_le16(0x060E, registers + 0x1BE);
+    sys_put_le16(0x4B21, registers + 0x17A);
+    registers[0x1A0] = 50;
+}
+ZTEST(iqs9151_profile, test_survey_measures_expected_base_error_before_candidates) {
+    prepare_survey();
+    zassert_ok(iqs9151_test_survey(&bus, &irq));
+    zassert_equal(base_requests, 4);
+    zassert_equal(candidate_requests, 3);
+    zassert_equal(reseed_requests, 3);
+    const uint16_t fine[] = {20, 12, 8, 6, 6, 6, 6};
+    const uint16_t target[] = {0, 0, 0, 0, 800, 900, 1000};
+    zassert_mem_equal(requested_fine, fine, sizeof(fine));
+    zassert_mem_equal(requested_targets, target, sizeof(target));
+    zassert_true(cell_reads >= 7 * 12 * 3 * 2);
+    zassert_false(sys_get_le16(registers + 0x1BE) & BIT(8));
+    zassert_true(sys_get_le16(registers + 0x1BE) & BIT(7));
+}
+ZTEST(iqs9151_profile, test_survey_skips_targets_below_measured_floor_margin) {
+    prepare_survey();
+    survey_base_max = 850;
+    zassert_ok(iqs9151_test_survey(&bus, &irq));
+    zassert_equal(base_requests, 4);
+    zassert_equal(candidate_requests, 1);
+    zassert_equal(requested_targets[4], 1000);
+}
+ZTEST(iqs9151_profile, test_survey_bus_failure_does_not_try_more_settings) {
+    prepare_survey();
+    survey_fail_read = -EIO;
+    zassert_equal(iqs9151_test_survey(&bus, &irq), -EIO);
+    zassert_equal(base_requests, 1);
+    zassert_equal(candidate_requests, 0);
+}
+ZTEST(iqs9151_profile, test_survey_never_qualifies_base_or_failed_calibration) {
+    prepare_survey();
+    uint16_t base = 0;
+    bool passes = true;
+    zassert_ok(iqs9151_test_survey_phase(&bus, &irq, 6, 0, &base, &passes));
+    zassert_false(passes);
+    survey_candidate_error = true;
+    zassert_ok(iqs9151_test_survey_phase(&bus, &irq, 6, 800, &base, &passes));
+    zassert_false(passes);
+    survey_candidate_error = false;
+    survey_bad_count = true;
+    zassert_ok(iqs9151_test_survey_phase(&bus, &irq, 6, 800, &base, &passes));
+    zassert_false(passes);
+    survey_bad_count = false;
+    survey_zero_comp = true;
+    zassert_ok(iqs9151_test_survey_phase(&bus, &irq, 6, 800, &base, &passes));
+    zassert_false(passes);
+    survey_zero_comp = false;
+    zassert_ok(iqs9151_test_survey_phase(&bus, &irq, 6, 800, &base, &passes));
+    zassert_true(passes);
+}
+ZTEST(iqs9151_profile, test_survey_base_gate_uses_counts_not_stale_reference) {
+    prepare_survey();
+    survey_stale_ref = true;
+    zassert_ok(iqs9151_test_survey(&bus, &irq));
+    zassert_equal(base_requests, 4);
+    zassert_equal(candidate_requests, 3);
+}
+ZTEST(iqs9151_profile, test_survey_reset_invalidates_measurement) {
+    prepare_survey();
+    survey_reset = true;
+    zassert_equal(iqs9151_test_survey(&bus, &irq), -EIO);
+    zassert_equal(base_requests, 1);
+    zassert_equal(candidate_requests, 0);
+}
+#endif

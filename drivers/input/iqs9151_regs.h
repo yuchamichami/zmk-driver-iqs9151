@@ -40,6 +40,7 @@
 #define IQS9151_TP_FINE_DIVIDER_SHIFT          9
 #define IQS9151_ADDR_ATI_SETTINGS              0x1196
 #define IQS9151_ADDR_TRACKPAD_ATI_TARGET       0x1196
+#define IQS9151_ADDR_TP_REF_DRIFT_LIMIT        0x11A0
 #define IQS9151_ADDR_DEVICE_CONFIG             0x11A2
 #define IQS9151_ADDR_SYSTEM_CONTROL            0x11BC
 #define IQS9151_ADDR_CONFIG_SETTINGS           0x11BE
@@ -59,6 +60,8 @@
 
 /* Info Flags bits */
 #define IQS9151_INFO_SHOW_RESET                BIT(7)
+#define IQS9151_INFO_TP_ATI_ERROR              BIT(3)
+#define IQS9151_INFO_ALP_ATI_ERROR             BIT(5)
 #define IQS9151_INFO_GLOBAL_TP_TOUCH           BIT(9)
 #define IQS9151_INFO_TP_TOUCH_TOGGLED          BIT(13)
 
@@ -102,5 +105,7 @@
 #define IQS9151_CFG_GESTURE_EVENT_EN           BIT(9)
 #define IQS9151_CFG_EVENT_MODE                 BIT(8)
 #define IQS9151_CFG_MANUAL_MODE                BIT(7)
+#define IQS9151_CFG_ALP_RE_ATI_ENABLE           BIT(3)
+#define IQS9151_CFG_TP_RE_ATI_ENABLE            BIT(2)
 
 #endif /* ZEPHYR_DRIVERS_INPUT_IQS9151_REGS_H_ */

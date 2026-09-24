@@ -131,3 +131,11 @@ uses target 700 and fine divider 8, changing only the divider relative to
 the preceding target-700 test. Other multiplier/coarse fields are preserved.
 The driver verifies the readback and reapplies the setting after sensor reset.
 This is experimental tuning, not hardware validation; ATI errors remain fatal.
+
+### Base-count calibration survey (diagnostic only)
+
+The Azoteq [User Guide v1.0, pp.20–23](https://www.azoteq.com/images/stories/pdf/IQS9150_IQS9151_User_Guide.pdf) specifies target=0 + TP Re-ATI to measure base counts before choosing ATI parameters. The guide's example target100/ATI250 is not a universal profile. Increasing fine divider raises base counts: Corcell's five floor-limited cells increased about 1.58x when fine changed5→8. Merely increasing fine into the recommended range was not sufficient tuning.
+
+`CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY=y` is an opt-in, A2-only diagnostic. It runs after boot, holds manual Active and disables automatic re-ATI/event mode. It captures all156cells twice at coarse set0, fine20/12/8/6, target0. Target0 ATI errors are measurement results, never calibration success. Candidate ATI targets800/900/1000 atfine6 are tested only above the measured maximum base count plus50. Normal-target ATI errors remain failures; I2C/readback/reset failures abort the survey. No pointer output or persistent settings are produced. Keep the sensor untouched during capture.
+
+Fine6 follows the User Guide's minimum; the earlier datasheet recommends above6. The finite candidate range is an experiment informed by this PCB's measurements, not a generic or shipping profile. Successful ATI alone does not validate sensitivity, overlay, drift, sleep behavior, or manufacturing repeatability.

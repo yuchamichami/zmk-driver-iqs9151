@@ -2640,6 +2640,10 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     return 0;
 }
 
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
+#include "iqs9151_calibration_survey.inc"
+#endif
+
 /* A sensor reset loses its RAM settings. Do not continue with the chip's
  * default electrode map after merely clearing host gesture history. */
 static int iqs9151_restore_configuration(const struct device *dev) {
@@ -2724,6 +2728,7 @@ static int iqs9151_init(const struct device *dev) {
     // Check Product Number
     ret = iqs9151_check_product_number(dev);
     if (ret != 0) {
+        LOG_ERR("Product ID read/validation failed (%d)", ret);
         return ret;
     }
 
@@ -2757,6 +2762,17 @@ static int iqs9151_init(const struct device *dev) {
         return ret;
     }
     LOG_DBG("Kconfig overrides applied");
+
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
+    ret = iqs9151_survey_prepare(cfg);
+    if (ret != 0) {
+        LOG_ERR("Calibration survey preparation failed (%d)", ret);
+        return ret;
+    }
+    iqs9151_survey_device = dev;
+    LOG_WRN("Calibration survey armed: starts 12s after boot; cursor input disabled");
+    return 0;
+#endif
 
     // ATI
     ret = iqs9151_run_ati(cfg);
@@ -2861,6 +2877,21 @@ int iqs9151_test_restore(const struct i2c_dt_spec *i2c, const struct gpio_dt_spe
     const struct device dev = {.config = &cfg};
     return iqs9151_restore_configuration(&dev);
 }
+
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
+int iqs9151_test_survey(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
+    const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    const struct device dev = {.config = &cfg};
+    return iqs9151_calibration_survey(&dev);
+}
+
+int iqs9151_test_survey_phase(const struct i2c_dt_spec *i2c,
+                            const struct gpio_dt_spec *irq, unsigned int fine,
+                            uint16_t target, uint16_t *base_max, bool *passes) {
+    const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    return iqs9151_survey_phase(&cfg, fine, target, base_max, passes);
+}
+#endif
 
 int iqs9151_test_ati(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
     struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};

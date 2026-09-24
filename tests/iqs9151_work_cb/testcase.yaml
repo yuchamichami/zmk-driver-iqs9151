@@ -6,3 +6,7 @@ tests:
     tags: [iqs9151, input]
     platform_allow: [native_sim, qemu_cortex_m3]
     extra_args: IQS9151_TEST_A2=ON
+  iqs9151.work_cb.a2_survey:
+    tags: [iqs9151, input]
+    platform_allow: [qemu_cortex_m3]
+    extra_args: [IQS9151_TEST_A2=ON, IQS9151_TEST_SURVEY=ON]

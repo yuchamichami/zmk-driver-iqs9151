@@ -399,6 +399,20 @@ config INPUT_IQS9151_ATI_DIAGNOSTICS
       Read-only diagnostic dump of counts, references and compensation.
       Does not bypass ATI errors or enable cursor input on calibration failure.
 
+config INPUT_IQS9151_CALIBRATION_SURVEY
+    bool "A2 diagnostic-only calibration survey (no cursor input)"
+    default n
+    depends on INPUT_IQS9151_TPS43_A2 && LOG
+    select INPUT_IQS9151_ATI_DIAGNOSTICS
+    help
+      Twelve seconds after boot, measure all 156 base channels at fine
+      dividers 20, 12, 8 and 6 using the manufacturer's target-zero method.
+      Then test targets 800, 900 and 1000 at divider 6 only when measured
+      base counts leave sufficient headroom. Hold manual Active mode and
+      disable automatic recalibration while measuring. This firmware never
+      enables touchpad input, even if a calibration candidate passes.
+      Results are volatile diagnostics, not a validated production profile.
+
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"
     depends on ZTEST
