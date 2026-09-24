@@ -215,7 +215,80 @@ static int iqs9151_survey_prepare(const struct iqs9151_config *cfg) {
     return 0;
 }
 
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY)
+static int iqs9151_frequency_survey(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    /* Datasheet v1.1 A.17: TP Frac, TP Period 1, TP Period 2.
+     * Keep oscillator and every other hardware parameter unchanged. */
+    static const struct {
+        uint32_t hz;
+        uint8_t registers[3];
+    } frequencies[] = {
+        {2500000, {0x28, 2, 2}},
+        {1500000, {0x18, 4, 4}},
+        {1000000, {0x10, 7, 7}},
+    };
+    static const uint16_t targets[] = {800, 825, 850, 875};
+    unsigned int total_attempted = 0, total_passed = 0, phases = 0;
+    const int64_t started = k_uptime_get();
+    LOG_WRN("SURVEY frequency comparison begin: maximum 15 phases; no cursor input");
+    for (unsigned int f = 0; f < ARRAY_SIZE(frequencies); ++f) {
+        uint8_t readback[3];
+        uint16_t info;
+        int ret = iqs9151_survey_prepare(cfg);
+        if (ret != 0) return ret;
+        LOG_INF("SURVEY frequency begin hz=%u frac=0x%02x period1=%u period2=%u",
+                frequencies[f].hz, frequencies[f].registers[0],
+                frequencies[f].registers[1], frequencies[f].registers[2]);
+        ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_TP_FREQUENCY,
+                                frequencies[f].registers, sizeof(readback));
+        if (ret != 0) return ret;
+        ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_TP_FREQUENCY,
+                               readback, sizeof(readback));
+        if (ret != 0) return ret;
+        if (memcmp(readback, frequencies[f].registers, sizeof(readback)) != 0) {
+            LOG_ERR("SURVEY frequency readback mismatch hz=%u read=0x%02x,%u,%u",
+                    frequencies[f].hz, readback[0], readback[1], readback[2]);
+            return -EIO;
+        }
+        ret = iqs9151_survey_info(cfg, &info);
+        if (ret != 0) return ret;
+        uint16_t base_max = 0;
+        bool ignored;
+        phases++;
+        ret = iqs9151_survey_phase(cfg, 6, 0, &base_max, &ignored);
+        if (ret != 0) return ret;
+        unsigned int attempted = 0, passed = 0;
+        for (unsigned int t = 0; t < ARRAY_SIZE(targets); ++t) {
+            const uint16_t target = targets[t];
+            if ((uint32_t)base_max + IQS9151_SURVEY_DRIFT >= target) {
+                LOG_WRN("SURVEY skip hz=%u fine=6 target=%u base_max=%u "
+                        "needs > base_max+50", frequencies[f].hz, target, base_max);
+                continue;
+            }
+            bool candidate_pass;
+            phases++;
+            attempted++;
+            ret = iqs9151_survey_phase(cfg, 6, target, &base_max, &candidate_pass);
+            if (ret != 0) return ret;
+            passed += candidate_pass;
+        }
+        total_attempted += attempted;
+        total_passed += passed;
+        LOG_WRN("SURVEY frequency done hz=%u base_max=%u attempted=%u pass_count=%u",
+                frequencies[f].hz, base_max, attempted, passed);
+    }
+    LOG_WRN("SURVEY frequency comparison done phases=%u attempted=%u pass_count=%u "
+            "elapsed_ms=%lld; diagnostics only, input remains disabled",
+            phases, total_attempted, total_passed, (long long)(k_uptime_get() - started));
+    return 0;
+}
+#endif
+
 static int iqs9151_calibration_survey(const struct device *dev) {
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY)
+    return iqs9151_frequency_survey(dev);
+#else
     const struct iqs9151_config *cfg = dev->config;
     static const unsigned int fine_values[] = {20, 12, 8, 6};
     static const uint16_t targets[] = {800, 900, 1000};
@@ -247,6 +320,7 @@ static int iqs9151_calibration_survey(const struct device *dev) {
     LOG_WRN("SURVEY done base_max_fine6=%u attempted=%u pass_count=%u; "
             "diagnostics only, input remains disabled", fine6_base_max, attempted, passed);
     return 0;
+#endif
 }
 
 static void iqs9151_survey_thread(void *a, void *b, void *c) {

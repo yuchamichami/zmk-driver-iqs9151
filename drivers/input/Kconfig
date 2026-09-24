@@ -413,6 +413,19 @@ config INPUT_IQS9151_CALIBRATION_SURVEY
       enables touchpad input, even if a calibration candidate passes.
       Results are volatile diagnostics, not a validated production profile.
 
+config INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY
+    bool "Compare A2 calibration at 2.5, 1.5 and 1 MHz (no cursor input)"
+    default n
+    depends on INPUT_IQS9151_CALIBRATION_SURVEY
+    help
+      Replace the standard calibration survey with three charge-transfer
+      frequency sets from datasheet A.17. At each frequency, measure base
+      counts at fine divider 6, then test targets 800, 825, 850 and 875 only
+      when the measured base leaves more than 50 counts of headroom.
+      Read back all frequency bytes before measuring. Maximum 15 phases,
+      with two complete 156-channel samples per phase. Existing strict
+      calibration checks remain active; no cursor input is enabled.
+
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"
     depends on ZTEST

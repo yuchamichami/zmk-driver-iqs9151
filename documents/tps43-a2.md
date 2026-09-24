@@ -139,3 +139,9 @@ The Azoteq [User Guide v1.0, pp.20–23](https://www.azoteq.com/images/stories/p
 `CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY=y` is an opt-in, A2-only diagnostic. It runs after boot, holds manual Active and disables automatic re-ATI/event mode. It captures all156cells twice at coarse set0, fine20/12/8/6, target0. Target0 ATI errors are measurement results, never calibration success. Candidate ATI targets800/900/1000 atfine6 are tested only above the measured maximum base count plus50. Normal-target ATI errors remain failures; I2C/readback/reset failures abort the survey. No pointer output or persistent settings are produced. Keep the sensor untouched during capture.
 
 Fine6 follows the User Guide's minimum; the earlier datasheet recommends above6. The finite candidate range is an experiment informed by this PCB's measurements, not a generic or shipping profile. Successful ATI alone does not validate sensitivity, overlay, drift, sleep behavior, or manufacturing repeatability.
+
+### Frequency comparison survey
+
+`CONFIG_INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY=y` extends the diagnostic survey (not normal firmware) with fine6 fixed at2.5MHz,1.5MHz,1MHz. Each frequency uses datasheet A.17's FRAC/PERIOD1/PERIOD2 bytes, verified by readback, and remeasures target0 base counts before trying eligible targets800/825/850/875. All candidate error/range checks and reseeding remain; no pointer output. At most15 phases run. User Guide §5.1 recommends slower conversions when incomplete charge transfer is suspected. The comparison does not establish that it is the cause on A2.
+
+A2 first-board v9 has stable base83..705 atfine6, but targets800/900/1000 fail at1/2/4 cells. Every failed cell is at compensation511/767; the same cells pass at another target. Targets825/850/875 probe the gaps between previous100-count steps, while800 provides a controlled frequency comparison. D000 compensation values are read-only and never written.
