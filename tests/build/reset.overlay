@@ -1,0 +1,3 @@
+&test_trackpad {
+    reset-gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+};

@@ -1,0 +1,11 @@
+/* Compile-test pin assignment only; not a Corcell wiring prescription. */
+&uart0 { status = "disabled"; };
+&xiao_i2c {
+    status = "okay";
+    clock-frequency = <100000>;
+    test_trackpad: trackpad@56 {
+        compatible = "azoteq,iqs9151";
+        reg = <0x56>;
+        irq-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+    };
+};

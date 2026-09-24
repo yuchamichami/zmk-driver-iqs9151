@@ -1,0 +1,23 @@
+/* Standalone XIAO example, NOT a Corcell slot pin assignment.
+ * SDA=D4, SCL=D5, RDY=D6. Free UART pins before using D6.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+&uart0 { status = "disabled"; };
+&xiao_i2c {
+    status = "okay";
+    clock-frequency = <100000>;
+    a2_trackpad: trackpad@56 {
+        compatible = "azoteq,iqs9151";
+        reg = <0x56>;
+        irq-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+        /* Pin 1 unconnected: omit reset-gpios.
+         * If wired to a spare GPIO, add an ACTIVE_LOW reset-gpios property.
+         */
+    };
+};
+/ {
+    a2_listener {
+        compatible = "zmk,input-listener";
+        device = <&a2_trackpad>;
+    };
+};

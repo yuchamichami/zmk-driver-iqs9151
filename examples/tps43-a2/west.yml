@@ -1,0 +1,6 @@
+# Merge this project into your existing manifest. Do not install both forks.
+manifest:
+  projects:
+    - name: zmk-driver-iqs9151
+      url: https://github.com/yuchamichami/zmk-driver-iqs9151
+      revision: tps43-a2

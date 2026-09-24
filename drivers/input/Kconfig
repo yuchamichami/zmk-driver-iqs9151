@@ -10,6 +10,44 @@ menuconfig INPUT_IQS9151
 
 if INPUT_IQS9151
 
+config INPUT_IQS9151_TPS43_A2
+    bool "TPS43-outline A2 PCB (13 Rx / 12 Tx)"
+    default n
+    help
+      Select the custom IQS9151 A2 PCB, not an Azoteq TPS43 module.
+      Overrides electrode mapping, channel mask and ALP electrodes.
+      One profile per firmware image; all IQS9151 instances share it.
+      Initial settings assume a 1 mm insulating overlay, but require
+      measurement and tuning for the actual material and adhesive.
+
+config INPUT_IQS9151_TOUCH_SET_THRESHOLD
+    int "Touch set threshold multiplier"
+    range 1 255
+    default 30
+    help
+      Register 0x11CC. A tuning value, not an overlay thickness.
+
+config INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD
+    int "Touch clear threshold multiplier"
+    range 0 255
+    default 26
+    help
+      Register 0x11CD. Must not exceed the touch set threshold.
+
+config INPUT_IQS9151_ALP_THRESHOLD
+    int "Alternate low-power touch threshold"
+    range 1 255
+    default 8
+    help
+      Register 0x11CE. Tune wake detection with the actual overlay.
+
+config INPUT_IQS9151_ALP_AUTOPROX_THRESHOLD
+    int "Alternate low-power auto-proximity threshold"
+    range 1 255
+    default 8
+    help
+      Register 0x11CF. Tune with the final enclosure and overlay.
+
 config INPUT_IQS9151_LOG_LEVEL
     int "IQS9151 log level"
     range 0 4
@@ -31,7 +69,6 @@ choice INPUT_IQS9151_ROTATE
     default INPUT_IQS9151_ROTATE_0
     help
       Rotate the trackpad coordinate system (0/90/180/270).
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_ROTATE_0
     bool "0"
@@ -49,31 +86,30 @@ endchoice
 config INPUT_IQS9151_RESOLUTION_X
     int "IQS9151 X resolution"
     range 0 4095
+    default 3600 if INPUT_IQS9151_TPS43_A2
     default 2457
     help
       X Resolution (0x11E6).
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_RESOLUTION_Y
     int "IQS9151 Y resolution"
     range 0 4095
+    default 3300 if INPUT_IQS9151_TPS43_A2
     default 3072
     help
       Y Resolution (0x11E8).
       Limited to 0-4095 to match the practical 12-bit trackpad
       coordinate scale used by the device configuration.
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000
     default 400
     help
-      Trackpad ATI Target (0x119A).
+      Trackpad ATI Target (0x1196).
       Limited to 0-1000 to avoid unstable behavior.
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED
     int "IQS9151 dynamic filter bottom speed"
@@ -83,7 +119,6 @@ config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED
       XY Dynamic Filter Bottom Speed (0x11EA).
       Limited to 0-2047 to stay within the documented trackpad count
       upper-limit scale.
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED
     int "IQS9151 dynamic filter top speed"
@@ -93,7 +128,6 @@ config INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED
       XY Dynamic Filter Top Speed (0x11EC).
       Limited to 0-2047 to stay within the documented trackpad count
       upper-limit scale.
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA
     int "IQS9151 dynamic filter bottom beta"
@@ -101,7 +135,6 @@ config INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_BETA
     default 20
     help
       XY Dynamic Filter Bottom Beta (0x11EE).
-      Currently not applied by the driver.
 
 config INPUT_IQS9151_1F_TAP_ENABLE
     bool "IQS9151 single-finger tap enable"

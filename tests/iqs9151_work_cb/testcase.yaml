@@ -1,8 +1,8 @@
 tests:
   iqs9151.work_cb:
-    tags:
-      - iqs9151
-      - input
-    platform_allow:
-      - native_sim
-      - native_sim_64
+    tags: [iqs9151, input]
+    platform_allow: [native_sim, qemu_cortex_m3]
+  iqs9151.work_cb.a2:
+    tags: [iqs9151, input]
+    platform_allow: [native_sim, qemu_cortex_m3]
+    extra_args: IQS9151_TEST_A2=ON

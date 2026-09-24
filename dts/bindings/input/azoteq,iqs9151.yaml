@@ -1,5 +1,5 @@
 description: |
-  Azoteq IQS9151 driver placeholder.
+  Azoteq IQS9151 capacitive trackpad driver.
 
 compatible: "azoteq,iqs9151"
 
@@ -9,4 +9,10 @@ properties:
   irq-gpios:
     type: phandle-array
     required: true
-    description: Interrupt GPIO for IQS9151 driver.
+    description: Active-low RDY input. Use GPIO_ACTIVE_LOW; module has a pull-up.
+  reset-gpios:
+    type: phandle-array
+    description: |
+      Optional active-low MCLR output. Use GPIO_ACTIVE_LOW. Omit this
+      property when connector pin 1 is unconnected; software reset is used.
+      Do not connect this pin to GND with the A2 R5 link populated.

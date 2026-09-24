@@ -12,7 +12,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
-#include "iqs9151_init.h"
+#include "iqs9151_profile.h"
 #include "iqs9151_regs.h"
 #include "iqs9151_test.h"
 
@@ -21,6 +21,12 @@
 #include <string.h>
 
 LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
+BUILD_ASSERT(CONFIG_INPUT_IQS9151_TOUCH_CLEAR_THRESHOLD <=
+             CONFIG_INPUT_IQS9151_TOUCH_SET_THRESHOLD,
+             "Touch clear threshold must not exceed set threshold");
+BUILD_ASSERT(CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_BOTTOM_SPEED <=
+             CONFIG_INPUT_IQS9151_DYNAMIC_FILTER_TOP_SPEED,
+             "Dynamic filter bottom speed must not exceed top speed");
 
 #define DT_DRV_COMPAT azoteq_iqs9151
 
@@ -85,6 +91,7 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 struct iqs9151_config {
     struct i2c_dt_spec i2c;
     struct gpio_dt_spec irq_gpio;
+    struct gpio_dt_spec reset_gpio;
 };
 struct iqs9151_frame {
     int16_t rel_x;
@@ -185,6 +192,7 @@ struct iqs9151_motion_history {
 };
 
 struct iqs9151_data {
+    bool needs_reconfigure;
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
@@ -527,6 +535,26 @@ static const struct iqs9151_inertia_gate_params iqs9151_cursor_gate_params = {
     .min_avg_speed = CURSOR_INERTIA_MIN_AVG_SPEED,
 };
 
+/* gpio_pin_get_dt returns logical active state (RDY is active low).
+ * A negative GPIO error must never be interpreted as ready. */
+static int iqs9151_wait_for_ready(const struct iqs9151_config *cfg, uint16_t timeout_ms) {
+    const int64_t deadline = k_uptime_get() + timeout_ms;
+    for (;;) {
+        int ready = gpio_pin_get_dt(&cfg->irq_gpio);
+        if (ready < 0) {
+            return ready;
+        }
+        if (ready > 0) {
+            return 0;
+        }
+        if (k_uptime_get() >= deadline) {
+            LOG_WRN("RDY timeout after %u ms", timeout_ms);
+            return -ETIMEDOUT;
+        }
+        k_msleep(1);
+    }
+}
+
 static int iqs9151_i2c_write(const struct iqs9151_config *cfg, uint16_t reg, const uint8_t *buf, size_t len) {
     uint8_t tx[2 + IQS9151_I2C_CHUNK_SIZE];
 
@@ -534,16 +562,28 @@ static int iqs9151_i2c_write(const struct iqs9151_config *cfg, uint16_t reg, con
         return -EINVAL;
     }
 
+    int ret = iqs9151_wait_for_ready(cfg, 500);
+    if (ret != 0) {
+        return ret;
+    }
     sys_put_le16(reg, tx);
     memcpy(&tx[2], buf, len);
     return i2c_write_dt(&cfg->i2c, tx, len + 2);
 }
 
-static int iqs9151_i2c_read(const struct iqs9151_config *cfg, uint16_t reg, uint8_t *buf, size_t len) {
+static int iqs9151_i2c_read_now(const struct iqs9151_config *cfg, uint16_t reg,
+                               uint8_t *buf, size_t len) {
     uint8_t addr_buf[2];
-
     sys_put_le16(reg, addr_buf);
     return i2c_write_read_dt(&cfg->i2c, addr_buf, sizeof(addr_buf), buf, len);
+}
+
+static int iqs9151_i2c_read(const struct iqs9151_config *cfg, uint16_t reg, uint8_t *buf, size_t len) {
+    int ret = iqs9151_wait_for_ready(cfg, 500);
+    if (ret != 0) {
+        return ret;
+    }
+    return iqs9151_i2c_read_now(cfg, reg, buf, len);
 }
 
 static int iqs9151_write_u16(const struct iqs9151_config *cfg, uint16_t reg, uint16_t value) {
@@ -578,29 +618,12 @@ static int iqs9151_update_bits_u16(const struct iqs9151_config *cfg, uint16_t re
     return iqs9151_write_u16(cfg, reg, current);
 }
 
-static void iqs9151_wait_for_ready(const struct device *dev, uint16_t timeout_ms) {
-    const struct iqs9151_config *cfg = dev->config;
-    uint16_t elapsed = 0;
-
-    while (!gpio_pin_get_dt(&cfg->irq_gpio) && elapsed < timeout_ms) {
-        k_sleep(K_MSEC(1));
-        elapsed++;
-    }
-
-    if (elapsed >= timeout_ms) {
-        LOG_WRN("RDY timeout after %dms", timeout_ms);
-    }
-    LOG_DBG("IRQGPIO=%d,TIME=%dms", gpio_pin_get_dt(&cfg->irq_gpio), elapsed);
-}
-
-static int iqs9151_write_chunks(const struct device *dev, const struct iqs9151_config *cfg
-                                    , uint16_t start_reg, const uint8_t *buf, size_t len) {
+static int iqs9151_write_chunks(const struct iqs9151_config *cfg,
+                                  uint16_t start_reg, const uint8_t *buf, size_t len) {
     size_t offset = 0U;
 
     while (offset < len) {
         const size_t chunk_len = MIN(IQS9151_I2C_CHUNK_SIZE, len - offset);
-        
-        iqs9151_wait_for_ready(dev, 200);
 
         const int ret = iqs9151_i2c_write(cfg, start_reg + offset, buf + offset, chunk_len);
         if (ret != 0) {
@@ -616,7 +639,11 @@ static int iqs9151_check_product_number(const struct device *dev) {
     uint8_t product[2];
     int ret;
     
-    ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_PRODUCT_NUMBER, product, sizeof(product));
+    /* On an MCU-only reboot the sensor may still be in event mode, with
+     * RDY inactive indefinitely. Force the boot probe via normal I2C;
+     * default and our profile use clock-stretch force-comms (datasheet 12.9.2).
+     * The I2C controller must support clock stretching. */
+    ret = iqs9151_i2c_read_now(cfg, IQS9151_ADDR_PRODUCT_NUMBER, product, sizeof(product));
     if (ret != 0) {
         return ret;
     }
@@ -627,7 +654,7 @@ static int iqs9151_check_product_number(const struct device *dev) {
         return -ENODEV;
     }
 
-    LOG_DBG("product number 0x%04x", product_num);
+    LOG_INF("product number 0x%04x", product_num);
     return ret;
 }
 
@@ -2265,6 +2292,8 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
     iqs9151_push_finger_history(data, frame->finger_count, now_ms);
 }
 
+static int iqs9151_restore_configuration(const struct device *dev);
+
 static void iqs9151_work_cb(struct k_work *work) {
     struct iqs9151_data *data = CONTAINER_OF(work, struct iqs9151_data, work);
     const struct device *dev = data->dev;
@@ -2273,6 +2302,15 @@ static void iqs9151_work_cb(struct k_work *work) {
     int ret;
     const int64_t now_ms = k_uptime_get();
 
+    if (data->needs_reconfigure) {
+        ret = iqs9151_restore_configuration(dev);
+        if (ret != 0) {
+            LOG_ERR("Configuration restore retry failed (%d)", ret);
+            return;
+        }
+        data->needs_reconfigure = false;
+        return;
+    }
     ret = iqs9151_read_frame(cfg, &frame);
     if (ret != 0) {
         LOG_ERR("frame read failed (%d)", ret);
@@ -2280,6 +2318,15 @@ static void iqs9151_work_cb(struct k_work *work) {
     }
 
     iqs9151_process_frame(data, &frame, now_ms);
+    if (frame.info_flags & IQS9151_INFO_SHOW_RESET) {
+        data->needs_reconfigure = true;
+        ret = iqs9151_restore_configuration(dev);
+        if (ret != 0) {
+            LOG_ERR("Configuration restore failed (%d); check power/RDY", ret);
+        } else {
+            data->needs_reconfigure = false;
+        }
+    }
 }
 
 static void iqs9151_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
@@ -2297,11 +2344,10 @@ static int iqs9151_set_interrupt(const struct device *dev, const bool en) {
 }
 
 static int iqs9151_run_ati(const struct iqs9151_config *config) {
-    uint8_t ctrl[2] = {
-        SYSTEM_CONTROL_0,
-        SYSTEM_CONTROL_1 | IQS9151_SYS_CTRL_ALP_RE_ATI | IQS9151_SYS_CTRL_TP_RE_ATI,
-    };
-    return iqs9151_i2c_write(config, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
+    /* Re-ATI is bits 6/5 of the 16-bit register, NOT the high byte. */
+    return iqs9151_write_u16(config, IQS9151_ADDR_SYSTEM_CONTROL,
+                            ((uint16_t)SYSTEM_CONTROL_1 << 8) | SYSTEM_CONTROL_0 |
+                            IQS9151_SYS_CTRL_ALP_RE_ATI | IQS9151_SYS_CTRL_TP_RE_ATI);
 }
 
 static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
@@ -2312,7 +2358,6 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
         uint8_t ctrl[2];
         int ret;
 
-        iqs9151_wait_for_ready(dev, 100);
         ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
         if (ret != 0) {
             return ret;
@@ -2320,6 +2365,15 @@ static int iqs9151_wait_for_ati(const struct device *dev, uint16_t timeout_ms) {
 
         if ((sys_get_le16(ctrl) &
              (IQS9151_SYS_CTRL_ALP_RE_ATI | IQS9151_SYS_CTRL_TP_RE_ATI)) == 0U) {
+            uint16_t info;
+            ret = iqs9151_read_u16(cfg, IQS9151_ADDR_INFO_FLAGS, &info);
+            if (ret != 0) {
+                return ret;
+            }
+            if (info & (BIT(3) | BIT(5))) {
+                LOG_ERR("ATI calibration error: info=0x%04x; check electrodes/overlay", info);
+                return -EIO;
+            }
             return 0;
         }
 
@@ -2345,8 +2399,6 @@ static int iqs9151_ack_reset(const struct device *dev) {
     config |= IQS9151_SYS_CTRL_ACK_RESET;
     sys_put_le16(config, ctrl);
 
-    iqs9151_wait_for_ready(dev, 500);
-
     ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
     if (ret != 0) {
         LOG_ERR("Wrte SYSTEM CONTROL(ACK_RESET) failed (%d)", ret);
@@ -2365,7 +2417,6 @@ static int iqs9151_wait_for_show_reset(const struct device *dev, uint16_t timeou
         uint8_t info[2];
         int ret;
 
-        iqs9151_wait_for_ready(dev, 100);
         ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_INFO_FLAGS, info, sizeof(info));
         if (ret != 0) {
             return ret;
@@ -2384,33 +2435,17 @@ static int iqs9151_wait_for_show_reset(const struct device *dev, uint16_t timeou
 
 static int iqs9151_sw_reset(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
-    uint8_t ctrl[2];
-    int ret;
-
-    ret = iqs9151_i2c_read(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
+    uint8_t tx[4];
+    sys_put_le16(IQS9151_ADDR_SYSTEM_CONTROL, tx);
+    sys_put_le16(IQS9151_SYS_CTRL_SW_RESET, tx + 2);
+    /* Boot-only forced write: RDY may be silent after a host-only reset.
+     * STOP applies SW_RESET and restores streaming/default settings. */
+    int ret = i2c_write_dt(&cfg->i2c, tx, sizeof(tx));
     if (ret != 0) {
-        LOG_ERR("Read SYSTEM CONTROL(SW_RESET) failed (%d)", ret);
+        LOG_ERR("SW reset write failed (%d)", ret);
         return ret;
     }
-
-    uint16_t config = sys_get_le16(ctrl);
-    config |= IQS9151_SYS_CTRL_SW_RESET;
-    sys_put_le16(config, ctrl);
-
-    iqs9151_wait_for_ready(dev, 500);
-
-    ret = iqs9151_i2c_write(cfg, IQS9151_ADDR_SYSTEM_CONTROL, ctrl, sizeof(ctrl));
-    if (ret != 0) {
-        LOG_ERR("Wrte SYSTEM CONTROL(SW_RESET) failed (%d)", ret);
-        return ret;
-    }
-
-    ret = iqs9151_wait_for_show_reset(dev, 3000);
-    if (ret != 0) {
-        return ret;
-    }
-
-    return ret;
+    return iqs9151_wait_for_show_reset(dev, 3000);
 }
 
 static int iqs9151_set_event_mode(const struct device *dev) {
@@ -2426,8 +2461,6 @@ static int iqs9151_set_event_mode(const struct device *dev) {
     settings |= IQS9151_CFG_EVENT_MODE;
     sys_put_le16(settings, config_settings);
 
-    iqs9151_wait_for_ready(dev, 500);
-
     return iqs9151_i2c_write(cfg, IQS9151_ADDR_CONFIG_SETTINGS, config_settings, sizeof(config_settings));
 }
 
@@ -2435,33 +2468,31 @@ static int iqs9151_configure(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     int ret;
 
-    iqs9151_wait_for_ready(dev, 500);
-
-    ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_ALP_COMPENSATION,
+    ret = iqs9151_write_chunks(cfg, IQS9151_ADDR_ALP_COMPENSATION,
                                     iqs9151_alp_compensation,
                                     ARRAY_SIZE(iqs9151_alp_compensation));
     if (ret) {
         return ret;
     }
-    ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_SETTINGS_MINOR,
+    ret = iqs9151_write_chunks(cfg, IQS9151_ADDR_SETTINGS_MINOR,
                                     iqs9151_main_config,
                                     ARRAY_SIZE(iqs9151_main_config));
     if (ret) {
         return ret;
     }
-    ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_RX_TX_MAPPING,
+    ret = iqs9151_write_chunks(cfg, IQS9151_ADDR_RX_TX_MAPPING,
                                     iqs9151_rxtx_map,
                                     ARRAY_SIZE(iqs9151_rxtx_map));
     if (ret) {
         return ret;
     }
-    ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_CHANNEL_DISABLE,
+    ret = iqs9151_write_chunks(cfg, IQS9151_ADDR_CHANNEL_DISABLE,
                                     iqs9151_channel_disable,
                                     ARRAY_SIZE(iqs9151_channel_disable));
     if (ret) {
         return ret;
     }
-    ret = iqs9151_write_chunks(dev, cfg, IQS9151_ADDR_SNAP_ENABLE,
+    ret = iqs9151_write_chunks(cfg, IQS9151_ADDR_SNAP_ENABLE,
                                     iqs9151_snap_enable,
                                     ARRAY_SIZE(iqs9151_snap_enable));
     if (ret) {
@@ -2543,13 +2574,62 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     return 0;
 }
 
+/* A sensor reset loses its RAM settings. Do not continue with the chip's
+ * default electrode map after merely clearing host gesture history. */
+static int iqs9151_restore_configuration(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+    int ret = iqs9151_ack_reset(dev);
+    if (ret == 0) {
+        ret = iqs9151_configure(dev);
+    }
+    if (ret == 0) {
+        ret = iqs9151_apply_kconfig_overrides(dev);
+    }
+    if (ret == 0) {
+        ret = iqs9151_run_ati(cfg);
+    }
+    if (ret == 0) {
+        ret = iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+    }
+    if (ret == 0) {
+        ret = iqs9151_set_event_mode(dev);
+    }
+    if (ret == 0) {
+        LOG_INF("Sensor configuration restored after reset");
+    }
+    return ret;
+}
+
+static int iqs9151_hardware_reset(const struct iqs9151_config *cfg) {
+    if (cfg->reset_gpio.port == NULL) {
+        return 0; /* A2 pull-up allows a five-wire connection. */
+    }
+    if (!gpio_is_ready_dt(&cfg->reset_gpio)) {
+        return -ENODEV;
+    }
+    int ret = gpio_pin_configure_dt(&cfg->reset_gpio, GPIO_OUTPUT_ACTIVE);
+    if (ret != 0) {
+        return ret;
+    }
+    k_msleep(1);
+    ret = gpio_pin_set_dt(&cfg->reset_gpio, 0);
+    if (ret != 0) {
+        return ret;
+    }
+    k_msleep(IQS9151_RSTD_DELAY_MS);
+    return 0;
+}
+
 static int iqs9151_init(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
     struct iqs9151_data *data = dev->data;
     int ret;
     data->dev = dev;
 
-    LOG_DBG("Initialization Start");
+    LOG_INF("Initializing %s, resolution %dx%d, reset %s",
+            IS_ENABLED(CONFIG_INPUT_IQS9151_TPS43_A2) ? "TPS43 A2 13Rx/12Tx" : "upstream",
+            CONFIG_INPUT_IQS9151_RESOLUTION_X, CONFIG_INPUT_IQS9151_RESOLUTION_Y,
+            cfg->reset_gpio.port ? "GPIO" : "software only");
 
     if (!device_is_ready(cfg->i2c.bus)) {
         LOG_ERR("I2C bus not ready");
@@ -2569,15 +2649,17 @@ static int iqs9151_init(const struct device *dev) {
         return ret;
     }
 
-    iqs9151_wait_for_ready(dev, 500);
-    
+
+    ret = iqs9151_hardware_reset(cfg);
+    if (ret != 0) {
+        return ret;
+    }
+
     // Check Product Number
     ret = iqs9151_check_product_number(dev);
     if (ret != 0) {
         return ret;
     }
-
-    iqs9151_wait_for_ready(dev, 500);
 
     // SW Reset (Show Reset wait + ACK)
     ret = iqs9151_sw_reset(dev);
@@ -2587,8 +2669,6 @@ static int iqs9151_init(const struct device *dev) {
     }
     LOG_DBG("SW Reset complete");
 
-    iqs9151_wait_for_ready(dev, 500);
-
     // ACK Reset
     ret = iqs9151_ack_reset(dev);
     if (ret) {
@@ -2596,8 +2676,6 @@ static int iqs9151_init(const struct device *dev) {
         return ret;
     }
     LOG_DBG("ACK Reset complete");
-
-    iqs9151_wait_for_ready(dev, 500);
 
     // Setup Initial Config
     ret = iqs9151_configure(dev);
@@ -2607,16 +2685,12 @@ static int iqs9151_init(const struct device *dev) {
     }
     LOG_DBG("Setup Initial Config complete");
 
-    iqs9151_wait_for_ready(dev, 100);
-
     ret = iqs9151_apply_kconfig_overrides(dev);
     if (ret != 0) {
         LOG_ERR("Kconfig override apply failed: %d", ret);
         return ret;
     }
     LOG_DBG("Kconfig overrides applied");
-
-    iqs9151_wait_for_ready(dev, 100);
 
     // ATI
     ret = iqs9151_run_ati(cfg);
@@ -2631,7 +2705,7 @@ static int iqs9151_init(const struct device *dev) {
         LOG_ERR("ATI failed (%d)", ret);
         return ret;
     }
-    LOG_DBG("ATI complete");
+    LOG_INF("ATI complete");
 
     // Setup IRQ Call Back
     k_work_init(&data->work, iqs9151_work_cb);
@@ -2666,8 +2740,6 @@ static int iqs9151_init(const struct device *dev) {
         return -EIO;
     }
 
-    iqs9151_wait_for_ready(dev, 100);
-
     // Set Event Mode
     ret = iqs9151_set_event_mode(dev);
     if (ret) {
@@ -2677,12 +2749,63 @@ static int iqs9151_init(const struct device *dev) {
     LOG_DBG("Set Event Mode complete complete");
 
     // start IRQ
-    iqs9151_set_interrupt(dev, true);
-    LOG_DBG("Initialization complete");
+    ret = iqs9151_set_interrupt(dev, true);
+    if (ret != 0) {
+        return ret;
+    }
+    /* An event may already be pending before the edge interrupt was enabled. */
+    int ready = gpio_pin_get_dt(&cfg->irq_gpio);
+    if (ready < 0) {
+        (void)iqs9151_set_interrupt(dev, false);
+        return ready;
+    }
+    if (ready > 0) {
+        k_work_submit(&data->work);
+    }
+    LOG_INF("Initialization complete");
     return 0;
 }
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
+const uint8_t *iqs9151_test_config_block(uint16_t address, size_t *size) {
+    switch (address) {
+    case IQS9151_ADDR_SETTINGS_MINOR:
+        *size = sizeof(iqs9151_main_config);
+        return iqs9151_main_config;
+    case IQS9151_ADDR_RX_TX_MAPPING:
+        *size = sizeof(iqs9151_rxtx_map);
+        return iqs9151_rxtx_map;
+    case IQS9151_ADDR_CHANNEL_DISABLE:
+        *size = sizeof(iqs9151_channel_disable);
+        return iqs9151_channel_disable;
+    default:
+        *size = 0;
+        return NULL;
+    }
+}
+
+int iqs9151_test_boot_reset(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
+    const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    const struct device dev = {.config = &cfg};
+    return iqs9151_sw_reset(&dev);
+}
+
+int iqs9151_test_restore(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
+    const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    const struct device dev = {.config = &cfg};
+    return iqs9151_restore_configuration(&dev);
+}
+
+int iqs9151_test_ati(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
+    struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    return iqs9151_run_ati(&cfg);
+}
+
+int iqs9151_test_ready(const struct gpio_dt_spec *irq, uint16_t timeout_ms) {
+    struct iqs9151_config cfg = {.irq_gpio = *irq};
+    return iqs9151_wait_for_ready(&cfg, timeout_ms);
+}
+
 size_t iqs9151_test_context_size(void) {
     return sizeof(struct iqs9151_data);
 }
@@ -2794,6 +2917,7 @@ void iqs9151_test_force_pinch_session(void *ctx, bool active) {
 #define IQS9151_INIT(inst)                                                \
     static const struct iqs9151_config iqs9151_config_##inst = {    \
         .i2c = I2C_DT_SPEC_INST_GET(inst),                                      \
+        .reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {0}), \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(inst, irq_gpios),                     \
   };                                                                          \
   static struct iqs9151_data iqs9151_data_##inst;                 \
