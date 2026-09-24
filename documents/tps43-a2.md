@@ -145,3 +145,9 @@ Fine6 follows the User Guide's minimum; the earlier datasheet recommends above6.
 `CONFIG_INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY=y` extends the diagnostic survey (not normal firmware) with fine6 fixed at2.5MHz,1.5MHz,1MHz. Each frequency uses datasheet A.17's FRAC/PERIOD1/PERIOD2 bytes, verified by readback, and remeasures target0 base counts before trying eligible targets800/825/850/875. All candidate error/range checks and reseeding remain; no pointer output. At most15 phases run. User Guide §5.1 recommends slower conversions when incomplete charge transfer is suspected. The comparison does not establish that it is the cause on A2.
 
 A2 first-board v9 has stable base83..705 atfine6, but targets800/900/1000 fail at1/2/4 cells. Every failed cell is at compensation511/767; the same cells pass at another target. Targets825/850/875 probe the gaps between previous100-count steps, while800 provides a controlled frequency comparison. D000 compensation values are read-only and never written.
+
+### Fixed profile with input validation
+
+`CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION=y` is an A2 opt-in input path, mutually exclusive with surveys. It calibrates the configured target directly in Manual Active, explicitly reseeds, and verifies two complete156-cell snapshots before restoring automatic sensing and queuing ALP ATI. The same validation is used after sensor reset. Runtime TP ATI errors release held inputs/inertia and latch input off until reset and successful revalidation. A sticky failed reset does not trigger endless restore attempts.
+
+The first-board survey passed at2.5MHz, fine6,target850: count837–863, reference839–861, compensation48–799. This is one ATI followed by two reads, not two independent cold starts. Existing defaults are preserved; Corcell's experimental cursor artifact sets fine6/target850. Direct cold startup, pointing, sensitivity across the surface, battery power and sleep behavior still require hardware checks.

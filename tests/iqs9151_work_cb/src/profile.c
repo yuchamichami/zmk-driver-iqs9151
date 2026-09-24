@@ -15,7 +15,7 @@ static bool defer_alp_ati;
 static bool drop_fine_write, drop_frequency_write;
 static uint8_t registers[0x400];
 static unsigned int ati_requests;
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
 static bool survey_mock;
 static uint16_t survey_base_max;
 static int survey_fail_read;
@@ -49,7 +49,7 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
             return transfer_result;
         }
         uint16_t reg = sys_get_le16(msgs[0].buf);
-#ifdef CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS
+#if defined(CONFIG_INPUT_IQS9151_ATI_DIAGNOSTICS) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
         if (reg >= 0xA000) {
             zassert_equal(count, 2);
             zassert_true(msgs[1].flags & I2C_MSG_READ);
@@ -59,12 +59,12 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
                 uint16_t value = 0;
                 if ((reg & 0xF000) == 0xD000) {
                     value = target ? (780 | (16 << 10)) : (31 << 10);
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
                     if (survey_mock && survey_zero_comp) value &= ~0x3ff;
 #endif
                 } else {
                     value = target ? target : 100;
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
                     if (survey_mock && survey_bad_count && target && (reg & 0xF000) == 0xA000) value = target + 51;
                     if (survey_mock && survey_stale_ref && !target && (reg & 0xF000) == 0xB000) value = 65535;
                     if (survey_mock && !target && ((reg & 0xFFF) + i) == 154 && (reg & 0xF000) == 0xA000) {
@@ -74,7 +74,7 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
                 }
                 sys_put_le16(value, msgs[1].buf + i);
             }
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
             if (survey_mock) {
                 cell_reads++;
                 if (survey_fail_read) return survey_fail_read;
@@ -101,12 +101,12 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
                 gpio_level = 0; /* reset resumes streaming */
                 registers[0x20] = BIT(7);
             }
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
-            if (survey_mock && reg == 0x11BC && (registers[offset] & BIT(3))) {
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+            if ((survey_mock || IS_ENABLED(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)) && reg == 0x11BC && (registers[offset] & BIT(3))) {
                 registers[offset] &= ~BIT(3);
                 reseed_requests++;
             }
-            if (survey_mock && reg == 0x11BC && (registers[offset] & BIT(5))) {
+            if ((survey_mock || IS_ENABLED(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)) && reg == 0x11BC && (registers[offset] & BIT(5))) {
                 uint16_t target = sys_get_le16(registers + 0x196);
                 zassert_true(ati_requests < ARRAY_SIZE(requested_targets));
                 memcpy(requested_frequency[ati_requests], registers + 0x1D8, 3);
@@ -115,7 +115,7 @@ static int mock_transfer(const struct device *dev, struct i2c_msg *msgs,
                 ati_requests++;
                 if (target == 0) base_requests++; else candidate_requests++;
                 registers[offset] &= ~BIT(5);
-                registers[0x20] = survey_reset ? BIT(7) : ((target == 0 || survey_candidate_error) ? BIT(3) : 0);
+                if (survey_mock) registers[0x20] = survey_reset ? BIT(7) : ((target == 0 || survey_candidate_error) ? BIT(3) : 0);
                 return 0;
             }
 #endif
@@ -154,7 +154,7 @@ static void before(void *fixture) {
     drop_fine_write = drop_frequency_write = false;
     ati_requests = 0;
     memset(registers, 0, sizeof(registers));
-#ifdef CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
     survey_mock = false;
     survey_base_max = 700;
     survey_fail_read = 0;
@@ -396,5 +396,42 @@ ZTEST(iqs9151_profile, test_frequency_readback_mismatch_stops_before_measurement
     drop_frequency_write = true;
     zassert_equal(iqs9151_test_survey(&bus, &irq), -EIO);
     zassert_equal(ati_requests, 0);
+}
+#endif
+
+#ifdef CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION
+static void prepare_validated(void) {
+    emulate_sensor = survey_mock = true;
+    sys_put_le16(0x060E, registers + 0x1BE);
+    sys_put_le16(0x4B21, registers + 0x17A);
+    registers[0x1A0] = 50;
+}
+ZTEST(iqs9151_profile, test_validated_calibration_restores_automatic_modes_after_pass) {
+    prepare_validated();
+    zassert_ok(iqs9151_test_calibrate(&bus, &irq));
+    zassert_equal(ati_requests, 1);
+    zassert_equal(reseed_requests, 1);
+    zassert_equal(cell_reads, 72);
+    zassert_equal(sys_get_le16(registers + 0x1BE), 0x060E);
+    zassert_true(sys_get_le16(registers + 0x1BC) & BIT(6));
+    zassert_equal(sys_get_le16(registers + 0x196), CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT);
+}
+ZTEST(iqs9151_profile, test_validated_bad_counts_do_not_enable_events) {
+    prepare_validated();
+    survey_bad_count = true;
+    zassert_equal(iqs9151_test_calibrate(&bus, &irq), -EIO);
+    zassert_false(sys_get_le16(registers + 0x1BE) & BIT(8));
+}
+ZTEST(iqs9151_profile, test_validated_ati_error_does_not_enable_events) {
+    prepare_validated();
+    survey_candidate_error = true;
+    zassert_equal(iqs9151_test_calibrate(&bus, &irq), -EIO);
+    zassert_false(sys_get_le16(registers + 0x1BE) & BIT(8));
+}
+ZTEST(iqs9151_profile, test_validated_cell_read_failure_aborts) {
+    prepare_validated();
+    survey_fail_read = -EIO;
+    zassert_equal(iqs9151_test_calibrate(&bus, &irq), -EIO);
+    zassert_equal(ati_requests, 1);
 }
 #endif

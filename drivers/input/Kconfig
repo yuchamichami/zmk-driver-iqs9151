@@ -426,6 +426,19 @@ config INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY
       with two complete 156-channel samples per phase. Existing strict
       calibration checks remain active; no cursor input is enabled.
 
+config INPUT_IQS9151_VALIDATED_CALIBRATION
+    bool "Verify A2 calibration before enabling cursor input"
+    default n
+    depends on INPUT_IQS9151_TPS43_A2 && !INPUT_IQS9151_CALIBRATION_SURVEY
+    help
+      Calibrate the configured fine divider and ATI target in manual Active
+      mode, explicitly reseed, and verify two complete 156-channel samples.
+      Require no TP ATI error, no compensation endpoints, and both count
+      and reference within the unchanged drift limit before enabling input.
+      Restore automatic mode and repeat validation after a sensor reset.
+      A later TP ATI error latches input off until reset and successful
+      revalidation. This opt-in bring-up setting is not a production claim.
+
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"
     depends on ZTEST

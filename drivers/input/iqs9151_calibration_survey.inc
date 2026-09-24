@@ -20,7 +20,9 @@ struct iqs9151_survey_sample {
     unsigned int comp_zero, comp_saturated, outside_range;
 };
 
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
 static const struct device *iqs9151_survey_device;
+#endif
 
 static int iqs9151_survey_info(const struct iqs9151_config *cfg, uint16_t *info) {
     int ret = iqs9151_read_u16(cfg, IQS9151_ADDR_INFO_FLAGS, info);
@@ -98,15 +100,19 @@ static int iqs9151_survey_collect(const struct iqs9151_config *cfg,
             s->max_div = MAX(s->max_div, divider);
             s->comp_zero += comp == 0;
             s->comp_saturated += comp == 1023;
-            if (target != 0 &&
+            const bool outside_range = target != 0 &&
                 ((int32_t)count < (int32_t)target - IQS9151_SURVEY_DRIFT ||
                  (uint32_t)count > target + IQS9151_SURVEY_DRIFT ||
                  (int32_t)ref < (int32_t)target - IQS9151_SURVEY_DRIFT ||
-                 (uint32_t)ref > target + IQS9151_SURVEY_DRIFT)) {
+                 (uint32_t)ref > target + IQS9151_SURVEY_DRIFT);
+            if (outside_range) {
                 s->outside_range++;
             }
-            LOG_INF("ATI cell tx=%u rx=%u comp=%u div=%u count=%u ref=%u",
-                    tx, rx, comp, divider, count, ref);
+            if (IS_ENABLED(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) ||
+                comp == 0 || comp == 1023 || outside_range) {
+                LOG_INF("ATI cell tx=%u rx=%u comp=%u div=%u count=%u ref=%u",
+                        tx, rx, comp, divider, count, ref);
+            }
         }
     }
     return 0;
@@ -215,6 +221,7 @@ static int iqs9151_survey_prepare(const struct iqs9151_config *cfg) {
     return 0;
 }
 
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
 #if defined(CONFIG_INPUT_IQS9151_CALIBRATION_FREQUENCY_SURVEY)
 static int iqs9151_frequency_survey(const struct device *dev) {
     const struct iqs9151_config *cfg = dev->config;
@@ -336,3 +343,4 @@ static void iqs9151_survey_thread(void *a, void *b, void *c) {
 }
 K_THREAD_DEFINE(iqs9151_survey_tid, 2048, iqs9151_survey_thread,
                 NULL, NULL, NULL, 8, 0, 12000);
+#endif /* CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY */

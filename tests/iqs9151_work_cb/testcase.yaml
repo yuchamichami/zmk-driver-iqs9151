@@ -14,3 +14,7 @@ tests:
     tags: [iqs9151, input]
     platform_allow: [qemu_cortex_m3]
     extra_args: [IQS9151_TEST_A2=ON, IQS9151_TEST_SURVEY=ON, IQS9151_TEST_FREQUENCY_SURVEY=ON]
+  iqs9151.work_cb.a2_validated:
+    tags: [iqs9151, input]
+    platform_allow: [qemu_cortex_m3]
+    extra_args: [IQS9151_TEST_A2=ON, IQS9151_TEST_VALIDATED=ON]

@@ -193,6 +193,10 @@ struct iqs9151_motion_history {
 
 struct iqs9151_data {
     bool needs_reconfigure;
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+    bool calibration_fault;
+    bool reset_recovery_attempted;
+#endif
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
@@ -1967,15 +1971,8 @@ static int iqs9151_read_frame(const struct iqs9151_config *cfg,
     return 0;
 }
 
-static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
-                                      const struct iqs9151_frame *frame) {
+static void iqs9151_clear_input_state(struct iqs9151_data *data) {
     const struct device *dev = data->dev;
-
-    if ((frame->info_flags & IQS9151_INFO_SHOW_RESET) == 0U) {
-        return false;
-    }
-
-    LOG_WRN("SHOW_RESET detected: info=0x%04x", frame->info_flags);
     iqs9151_reset_gesture_states(data, dev, true);
     iqs9151_inertia_cancel(&data->inertia_scroll, &data->inertia_scroll_work);
     iqs9151_inertia_cancel(&data->inertia_cursor, &data->inertia_cursor_work);
@@ -1984,6 +1981,25 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
     iqs9151_motion_history_reset(&data->scroll_motion_history);
     iqs9151_motion_history_reset(&data->cursor_motion_history);
     memset(&data->prev_frame, 0, sizeof(data->prev_frame));
+}
+
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+static void iqs9151_latch_calibration_fault(struct iqs9151_data *data) {
+    if (!data->calibration_fault) {
+        data->calibration_fault = true;
+        iqs9151_clear_input_state(data);
+        LOG_ERR("Calibration fault: input disabled until reset and successful revalidation");
+    }
+}
+#endif
+
+static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
+                                      const struct iqs9151_frame *frame) {
+    if ((frame->info_flags & IQS9151_INFO_SHOW_RESET) == 0U) {
+        return false;
+    }
+    LOG_WRN("SHOW_RESET detected: info=0x%04x", frame->info_flags);
+    iqs9151_clear_input_state(data);
     return true;
 }
 
@@ -2253,6 +2269,14 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
     if (iqs9151_handle_show_reset(data, frame)) {
         return;
     }
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+    if (frame->info_flags & IQS9151_INFO_TP_ATI_ERROR) {
+        iqs9151_latch_calibration_fault(data);
+    }
+    if (data->calibration_fault) {
+        return;
+    }
+#endif
 
     released_from_hold =
         iqs9151_update_gesture_sessions(data, frame, &prev_frame, &two_result);
@@ -2306,9 +2330,17 @@ static void iqs9151_work_cb(struct k_work *work) {
         ret = iqs9151_restore_configuration(dev);
         if (ret != 0) {
             LOG_ERR("Configuration restore retry failed (%d)", ret);
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+            data->needs_reconfigure = false;
+            iqs9151_latch_calibration_fault(data);
+#endif
             return;
         }
         data->needs_reconfigure = false;
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+        data->calibration_fault = false;
+        data->reset_recovery_attempted = false;
+#endif
         return;
     }
     ret = iqs9151_read_frame(cfg, &frame);
@@ -2317,14 +2349,33 @@ static void iqs9151_work_cb(struct k_work *work) {
         return;
     }
 
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+    if (!(frame.info_flags & IQS9151_INFO_SHOW_RESET)) {
+        data->reset_recovery_attempted = false;
+    } else if (data->reset_recovery_attempted) {
+        /* One attempt per reset indication, even if ACK itself failed. */
+        return;
+    }
+#endif
     iqs9151_process_frame(data, &frame, now_ms);
     if (frame.info_flags & IQS9151_INFO_SHOW_RESET) {
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+        data->reset_recovery_attempted = true;
+#endif
         data->needs_reconfigure = true;
         ret = iqs9151_restore_configuration(dev);
         if (ret != 0) {
             LOG_ERR("Configuration restore failed (%d); check power/RDY", ret);
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+            data->needs_reconfigure = false;
+            iqs9151_latch_calibration_fault(data);
+#endif
         } else {
             data->needs_reconfigure = false;
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+            data->calibration_fault = false;
+            data->reset_recovery_attempted = false;
+#endif
         }
     }
 }
@@ -2640,14 +2691,56 @@ static int iqs9151_apply_kconfig_overrides(const struct device *dev) {
     return 0;
 }
 
-#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
+#if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY) || \
+    defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
 #include "iqs9151_calibration_survey.inc"
 #endif
+
+static int iqs9151_calibrate(const struct device *dev) {
+    const struct iqs9151_config *cfg = dev->config;
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+    BUILD_ASSERT(CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER >= 6);
+    BUILD_ASSERT(CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT > 0);
+    uint16_t normal_config;
+    int ret = iqs9151_read_u16(cfg, IQS9151_ADDR_CONFIG_SETTINGS, &normal_config);
+    if (ret != 0) return ret;
+    ret = iqs9151_survey_prepare(cfg);
+    if (ret != 0) return ret;
+    uint16_t unused_base_max = 0;
+    bool passes;
+    ret = iqs9151_survey_phase(cfg, CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER,
+                               CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT,
+                               &unused_base_max, &passes);
+    if (ret != 0) return ret;
+    if (!passes) {
+        LOG_ERR("Calibration validation failed: cursor input remains disabled");
+        return -EIO;
+    }
+    /* Resume the profile's automatic sensing/reference/power management.
+     * Input event mode is enabled separately, after successful calibration. */
+    normal_config &= ~(IQS9151_CFG_MANUAL_MODE | IQS9151_CFG_EVENT_MODE);
+    normal_config |= IQS9151_CFG_TP_RE_ATI_ENABLE | IQS9151_CFG_ALP_RE_ATI_ENABLE;
+    ret = iqs9151_survey_write_verify(cfg, IQS9151_ADDR_CONFIG_SETTINGS, normal_config);
+    if (ret != 0) return ret;
+    ret = iqs9151_write_u16(cfg, IQS9151_ADDR_SYSTEM_CONTROL, IQS9151_SYS_CTRL_ALP_RE_ATI);
+    if (ret != 0) return ret;
+    LOG_INF("Calibration validated: fine=%u target=%u, automatic mode restored",
+            CONFIG_INPUT_IQS9151_TP_FINE_DIVIDER, CONFIG_INPUT_IQS9151_ATI_TARGETCOUNT);
+    return 0;
+#else
+    int ret = iqs9151_run_ati(cfg);
+    if (ret != 0) {
+        LOG_ERR("ATI request failed (%d)", ret);
+        return ret;
+    }
+    LOG_DBG("ATI requested");
+    return iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+#endif
+}
 
 /* A sensor reset loses its RAM settings. Do not continue with the chip's
  * default electrode map after merely clearing host gesture history. */
 static int iqs9151_restore_configuration(const struct device *dev) {
-    const struct iqs9151_config *cfg = dev->config;
     int ret = iqs9151_ack_reset(dev);
     if (ret == 0) {
         ret = iqs9151_configure(dev);
@@ -2656,10 +2749,7 @@ static int iqs9151_restore_configuration(const struct device *dev) {
         ret = iqs9151_apply_kconfig_overrides(dev);
     }
     if (ret == 0) {
-        ret = iqs9151_run_ati(cfg);
-    }
-    if (ret == 0) {
-        ret = iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+        ret = iqs9151_calibrate(dev);
     }
     if (ret == 0) {
         ret = iqs9151_set_event_mode(dev);
@@ -2774,15 +2864,8 @@ static int iqs9151_init(const struct device *dev) {
     return 0;
 #endif
 
-    // ATI
-    ret = iqs9151_run_ati(cfg);
-    if (ret) {
-        LOG_ERR("ATI request failed (%d)", ret);
-        return ret;
-    }
-    LOG_DBG("ATI requested");
-
-    ret = iqs9151_wait_for_ati(dev, IQS9151_ATI_TIMEOUT_MS);
+    // ATI (strict manual-mode verification in the optional A2 profile).
+    ret = iqs9151_calibrate(dev);
     if (ret != 0) {
         LOG_ERR("ATI failed (%d)", ret);
         return ret;
@@ -2876,6 +2959,22 @@ int iqs9151_test_restore(const struct i2c_dt_spec *i2c, const struct gpio_dt_spe
     const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
     const struct device dev = {.config = &cfg};
     return iqs9151_restore_configuration(&dev);
+}
+
+int iqs9151_test_calibrate(const struct i2c_dt_spec *i2c, const struct gpio_dt_spec *irq) {
+    const struct iqs9151_config cfg = {.i2c = *i2c, .irq_gpio = *irq};
+    const struct device dev = {.config = &cfg};
+    return iqs9151_calibrate(&dev);
+}
+
+bool iqs9151_test_calibration_fault(const void *ctx) {
+#if defined(CONFIG_INPUT_IQS9151_VALIDATED_CALIBRATION)
+    const struct iqs9151_data *data = ctx;
+    return data->calibration_fault;
+#else
+    ARG_UNUSED(ctx);
+    return false;
+#endif
 }
 
 #if defined(CONFIG_INPUT_IQS9151_CALIBRATION_SURVEY)
